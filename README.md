@@ -1,69 +1,91 @@
-# URL Shortener
+# URL Shortener — Go + React + Redis
 
-This is a URL shortening service that allows users to input a long URL and receive a shortened URL in return. It is built using Golang and utilizes the Fiber web framework for high performance and concurrency.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-# How To Run?
+A URL shortening service: a Go API (Fiber) that mints 7-character short
+codes backed by Redis, plus a small React frontend. Built to explore
+goroutine-based ID generation and a two-way Redis mapping.
 
-Simply run the command `docker-compose up --build` from the directory the `docker-compose.yml` file is in.
+## Status & honest limitations
 
-Once everything spins up, navigate to `localhost:3000` and enjoy :)
+Checked against the code in this repo — including two claims earlier
+versions of this README got wrong:
 
-## Functionality
+- **No expiration.** An earlier README said mappings are stored "with
+  automatic expiration". There is no TTL or `EXPIRE` anywhere in
+  `main.go` — entries live in two Redis hashes until Redis is flushed or
+  evicts under memory pressure.
+- **The API does not HTTP-redirect.** `GET /?shortened=<code>` returns
+  JSON (`{"originalURL": "…"}`). The *frontend* performs the redirect:
+  it reads the path segment, asks the API, then sets
+  `window.location.href`.
+- **Short codes can theoretically collide.** A code is the first 7
+  characters of a UUID; the handler never checks whether that code is
+  already taken before writing it, so a collision would silently
+  overwrite the older mapping. Fine at demo scale, wrong for production.
+- **Dev-grade edges:** CORS allows all origins, there is no rate
+  limiting, auth, custom codes, or analytics (all still future work —
+  see below), and the API's Redis address is hardcoded to the Compose
+  hostname `redis-server:6379`, so running the Go binary outside Compose
+  needs that hostname to resolve.
 
-- Users can submit a URL via a POST request to the `/` endpoint. This will generate a unique 7 character ID that maps to the original URL
-- Users can visit the shortened URL (e.g. `example.com/abc1234`) and get automatically redirected to the original long URL
-- Shortened URLs are stored in a Redis hash map with automatic expiration for cache management
-- New unique IDs are generated concurrently using goroutines and channels to improve performance
+## How it works
 
-## Technologies
+**Shortening** — `POST /` with `{"url": "https://…"}`:
 
-- **Fiber** - High performance Go web framework building the API endpoints
-- **Goroutines** - Lightweight threads used to generate IDs concurrently
-- **Redis** - In-memory data structure store to map shortened IDs to original URLs
-- **UUID** - Generates randomized unique IDs
-- **CORS** - Enable cross-origin resource sharing
+1. Look the long URL up in the Redis hash `long_to_short`.
+2. If it exists, return it with `code: 1` (previously shortened).
+3. Otherwise take the next ID from a buffered channel (capacity 100)
+   that a background goroutine continuously fills with fresh UUIDs —
+   reads are mutex-guarded — and use its first 7 characters.
+4. Store both directions (`long_to_short` and `short_to_long`) and
+   return the code with `code: 2` (newly shortened).
 
-## Shortening Process
+**Resolving** — the frontend takes the path segment (e.g. `/a1b2c3d`),
+calls `GET /?shortened=a1b2c3d`, and navigates the browser to the
+returned `originalURL`. Unknown codes get a 404 from the API and the
+frontend sends the visitor back to the home page.
 
-When a URL shortening request comes in:
+## API
 
-1.  Validate URL and return error if invalid
-2.  Check Redis if the URL was shortened before
-    - If it exists, return the shortened URL. If not, continue
-3.  Generate a new Unique ID
-    - Acquire lock to read channel
-    - Read new ID from channel
-    - Release lock
-    - Start a goroutine to simultaneously replenish the channel with a new UUID
-4.  Save to Redis - Map long URL to short ID
-5.  Return the shortened URL
+| Endpoint | Body / params | Response |
+|---|---|---|
+| `POST /` | `{"url": "https://example.com/…"}` | `{"url", "value": "<code>", "code": 1 \| 2}` |
+| `GET /?shortened=<code>` | — | `{"originalURL": "https://…"}` or 404 |
 
-This allows high performance concurrency with goroutines while avoiding collisions.
+## Run it
 
-## Redirect Process
+Everything is wired in `docker-compose.yml`:
 
-When a user visits a shortened URL:
+```bash
+docker compose up --build
+```
 
-1.  Extract the short ID code
-2.  Lookup the ID in Redis to find the original URL
-3.  If found - Redirect the user
-4.  If not found - Return 404 error and navigate back to home page
+| Service | Host port | Notes |
+|---|---|---|
+| `frontend` | 3000 | React app (`frontend_test/url-shortener-website/`) — open http://localhost:3000 |
+| `url-shortener` | 5000 | Go/Fiber API (container port 3000) |
+| `redis-server` | 6380 | Redis (container port 6379) |
 
-## Frontend
+## Stack
 
-The React frontend allows users to:
+Go 1.21 · Fiber v2 · go-redis v8 · google/uuid · Redis · React (CRA) ·
+Docker Compose
 
-- Input a long URL
-- Get back shortened URL
-- Click to copy shortened URL
-- View what original URLs redirect to
-
-## Upcoming Work
-
-Future plans include:
+## Future work (unchanged from the original list — still not built)
 
 - Rate limiting to prevent abuse
-- Prevent looping via URL sanitization (maybe on the front-end itself?)
-- Custom short URL codes
-- Analytics on URL visits
-- Configurable expiration times
+- Loop prevention / URL sanitization
+- Custom short codes
+- Click analytics
+- Configurable expiration (which would also make the old README's
+  expiration claim true)
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+---
+
+*One of [Aman Thakkar's](https://github.com/amanthakkar) learning builds,
+documented as it actually is.*
